@@ -30,18 +30,19 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
-   set it as the `LINEAR_API_KEY` environment variable.
+2. Configure tracker auth:
+   - Linear: create a personal API key and set `LINEAR_API_KEY`.
+   - GitHub Projects v2: create a token with `repo` and `project` scopes and set `GITHUB_TOKEN`.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
 5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+   - Linear: get the project's slug from the project URL.
+   - GitHub Projects v2: set `tracker.repository`, `tracker.project_owner`, and `tracker.project_number`.
+   - When creating a workflow based on this repo, note that it depends on non-standard statuses:
+     "Rework", "Human Review", and "Merging". Configure matching Linear states or GitHub
+     Projects v2 Status options.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -83,7 +84,7 @@ Optional flags:
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
 
-Minimal example:
+Minimal example (Linear):
 
 ```md
 ---
@@ -103,6 +104,32 @@ codex:
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
+
+Title: {{ issue.title }} Body: {{ issue.description }}
+```
+
+Minimal example (GitHub Projects v2):
+
+```md
+---
+tracker:
+  kind: github
+  repository: "your-org/your-repo"
+  project_owner: "your-org"
+  project_number: 12
+  api_key: $GITHUB_TOKEN
+  active_states: ["Todo", "In Progress", "Rework", "Merging"]
+  terminal_states: ["Done", "Closed", "Canceled", "Cancelled", "Duplicate"]
+workspace:
+  root: ~/code/workspaces
+hooks:
+  after_create: |
+    git clone git@github.com:your-org/your-repo.git .
+codex:
+  command: codex app-server
+---
+
+You are working on GitHub issue {{ issue.identifier }}.
 
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
@@ -127,7 +154,8 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.api_key` reads from `LINEAR_API_KEY` for `tracker.kind=linear`.
+- `tracker.api_key` reads from `GITHUB_TOKEN` for `tracker.kind=github`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the

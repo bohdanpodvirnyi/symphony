@@ -7,6 +7,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   alias SymphonyElixir.PathSafety
 
+  @default_linear_endpoint "https://api.linear.app/graphql"
+  @default_github_endpoint "https://api.github.com/graphql"
+
   @primary_key false
 
   @type t :: %__MODULE__{}
@@ -46,9 +49,12 @@ defmodule SymphonyElixir.Config.Schema do
 
     embedded_schema do
       field(:kind, :string)
-      field(:endpoint, :string, default: "https://api.linear.app/graphql")
+      field(:endpoint, :string)
       field(:api_key, :string)
       field(:project_slug, :string)
+      field(:repository, :string)
+      field(:project_owner, :string)
+      field(:project_number, :integer)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
@@ -59,9 +65,10 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :repository, :project_owner, :project_number, :assignee, :active_states, :terminal_states],
         empty_values: []
       )
+      |> validate_number(:project_number, greater_than: 0)
     end
   end
 
@@ -368,7 +375,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
+      | endpoint: resolve_tracker_endpoint(settings.tracker.kind, settings.tracker.endpoint),
+        api_key: resolve_tracker_api_key(settings.tracker.kind, settings.tracker.api_key),
         assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
     }
 
@@ -412,6 +420,35 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp drop_nil_values(value) when is_list(value), do: Enum.map(value, &drop_nil_values/1)
   defp drop_nil_values(value), do: value
+
+  defp resolve_tracker_endpoint(kind, value) when is_binary(value) do
+    case String.trim(value) do
+      "" ->
+        default_tracker_endpoint(kind)
+
+      @default_linear_endpoint when kind == "github" ->
+        @default_github_endpoint
+
+      @default_github_endpoint when kind != "github" ->
+        @default_linear_endpoint
+
+      trimmed ->
+        trimmed
+    end
+  end
+
+  defp resolve_tracker_endpoint(kind, _value), do: default_tracker_endpoint(kind)
+
+  defp default_tracker_endpoint("github"), do: @default_github_endpoint
+  defp default_tracker_endpoint(_kind), do: @default_linear_endpoint
+
+  defp resolve_tracker_api_key("github", value) do
+    resolve_secret_setting(value, System.get_env("GITHUB_TOKEN"))
+  end
+
+  defp resolve_tracker_api_key(_kind, value) do
+    resolve_secret_setting(value, System.get_env("LINEAR_API_KEY"))
+  end
 
   defp resolve_secret_setting(nil, fallback), do: normalize_secret_value(fallback)
 

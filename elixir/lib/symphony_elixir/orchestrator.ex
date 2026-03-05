@@ -237,6 +237,22 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Linear project slug missing in WORKFLOW.md")
         state
 
+      {:error, :missing_github_api_token} ->
+        Logger.error("GitHub API token missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_repository} ->
+        Logger.error("GitHub repository missing in WORKFLOW.md (expected owner/repo)")
+        state
+
+      {:error, :missing_github_project_owner} ->
+        Logger.error("GitHub project owner missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_project_number} ->
+        Logger.error("GitHub project number missing in WORKFLOW.md")
+        state
+
       {:error, :missing_tracker_kind} ->
         Logger.error("Tracker kind missing in WORKFLOW.md")
 
@@ -264,7 +280,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
         state
 
       false ->

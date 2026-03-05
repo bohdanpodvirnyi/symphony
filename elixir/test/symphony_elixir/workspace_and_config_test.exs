@@ -883,6 +883,73 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "github tracker validation requires token, repository, project owner, and project number" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_endpoint: nil,
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      tracker_repository: nil,
+      tracker_project_owner: nil,
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_api_token} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "token",
+      tracker_repository: nil,
+      tracker_project_owner: nil,
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_repository} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "token",
+      tracker_repository: "openai/symphony",
+      tracker_project_owner: nil,
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_project_owner} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "token",
+      tracker_repository: "openai/symphony",
+      tracker_project_owner: "openai",
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_project_number} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "token",
+      tracker_repository: "openai/symphony",
+      tracker_project_owner: "openai",
+      tracker_project_number: 12
+    )
+
+    assert Config.github_endpoint() == "https://api.github.com/graphql"
+    assert :ok = Config.validate!()
+  end
+
+  test "tracker adapter switches to github" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "token",
+      tracker_repository: "openai/symphony",
+      tracker_project_owner: "openai",
+      tracker_project_number: 12
+    )
+
+    assert Tracker.adapter() == SymphonyElixir.Github.Adapter
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"

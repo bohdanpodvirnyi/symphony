@@ -27,6 +27,7 @@ defmodule SymphonyElixir.Github.Client do
         items(first: $first, after: $after) {
           nodes {
             id
+            updatedAt
             content {
               __typename
               ... on Issue {
@@ -78,6 +79,7 @@ defmodule SymphonyElixir.Github.Client do
         items(first: $first, after: $after) {
           nodes {
             id
+            updatedAt
             content {
               __typename
               ... on Issue {
@@ -138,6 +140,7 @@ defmodule SymphonyElixir.Github.Client do
         projectItems(first: 50) {
           nodes {
             id
+            updatedAt
             project {
               id
             }
@@ -146,6 +149,43 @@ defmodule SymphonyElixir.Github.Client do
               ... on ProjectV2ItemFieldSingleSelectValue {
                 name
                 optionId
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @issue_pr_feedback_query """
+  query SymphonyGithubIssuePrFeedback($repoOwner: String!, $repoName: String!, $issueNumber: Int!) {
+    repository(owner: $repoOwner, name: $repoName) {
+      issue(number: $issueNumber) {
+        timelineItems(first: 50, itemTypes: [CROSS_REFERENCED_EVENT]) {
+          nodes {
+            ... on CrossReferencedEvent {
+              source {
+                __typename
+                ... on PullRequest {
+                  number
+                  state
+                  reviewDecision
+                  reviewThreads(first: 100) {
+                    nodes {
+                      isResolved
+                    }
+                  }
+                  comments(last: 50) {
+                    nodes {
+                      body
+                      updatedAt
+                      author {
+                        login
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -183,6 +223,7 @@ defmodule SymphonyElixir.Github.Client do
         |> Enum.filter(&issue_for_repository?(&1, repo_owner, repo_name))
         |> Enum.map(&normalize_project_item/1)
         |> Enum.reject(&is_nil/1)
+        |> maybe_promote_human_review_issues_with_feedback(repo_owner, repo_name)
         |> Enum.filter(fn %Issue{state: state} -> MapSet.member?(active_state_set, normalize_state(state)) end)
 
       {:ok, issues}
@@ -467,6 +508,7 @@ defmodule SymphonyElixir.Github.Client do
           blocked_by: [],
           labels: normalize_labels(get_in(issue, ["labels", "nodes"])),
           assigned_to_worker: true,
+          project_item_updated_at: parse_datetime(item["updatedAt"]),
           created_at: parse_datetime(issue["createdAt"]),
           updated_at: parse_datetime(issue["updatedAt"])
         }
@@ -499,6 +541,7 @@ defmodule SymphonyElixir.Github.Client do
           blocked_by: [],
           labels: normalize_labels(get_in(issue, ["labels", "nodes"])),
           assigned_to_worker: true,
+          project_item_updated_at: parse_datetime(project_item["updatedAt"]),
           created_at: parse_datetime(issue["createdAt"]),
           updated_at: parse_datetime(issue["updatedAt"])
         }
@@ -549,6 +592,136 @@ defmodule SymphonyElixir.Github.Client do
   end
 
   defp normalize_state(_), do: ""
+
+  defp maybe_promote_human_review_issues_with_feedback(issues, repo_owner, repo_name)
+       when is_list(issues) and is_binary(repo_owner) and is_binary(repo_name) do
+    rework_state = preferred_rework_state_name()
+
+    Enum.map(issues, fn
+      %Issue{id: issue_id, state: state_name} = issue when is_binary(issue_id) and is_binary(state_name) ->
+        if normalize_state(state_name) == "human review" do
+          promote_human_review_issue_with_feedback(issue, rework_state, repo_owner, repo_name)
+        else
+          issue
+        end
+
+      issue ->
+        issue
+    end)
+  end
+
+  defp maybe_promote_human_review_issues_with_feedback(issues, _repo_owner, _repo_name), do: issues
+
+  defp promote_human_review_issue_with_feedback(
+         %Issue{id: issue_id, identifier: identifier, project_item_updated_at: project_item_updated_at, updated_at: issue_updated_at} = issue,
+         rework_state,
+         repo_owner,
+         repo_name
+       )
+       when is_binary(issue_id) and is_binary(rework_state) and is_binary(repo_owner) and is_binary(repo_name) do
+    feedback_watermark = project_item_updated_at || issue_updated_at
+
+    with {:ok, issue_number} <- parse_issue_number(issue_id),
+         true <- issue_has_pr_feedback?(repo_owner, repo_name, issue_number, feedback_watermark),
+         :ok <- update_issue_state(issue_id, rework_state) do
+      Logger.info("Promoted issue_id=#{issue_id} issue_identifier=#{identifier} to state=#{rework_state} due to PR feedback")
+      %{issue | state: rework_state}
+    else
+      false ->
+        issue
+
+      {:error, reason} ->
+        Logger.warning("Failed to promote issue_id=#{issue_id} issue_identifier=#{identifier} from Human review: #{inspect(reason)}")
+        issue
+    end
+  end
+
+  defp issue_has_pr_feedback?(repo_owner, repo_name, issue_number, issue_updated_at)
+       when is_binary(repo_owner) and is_binary(repo_name) and is_integer(issue_number) do
+    case graphql(@issue_pr_feedback_query, %{
+           repoOwner: repo_owner,
+           repoName: repo_name,
+           issueNumber: issue_number
+         }) do
+      {:ok, body} ->
+        body
+        |> get_in(["data", "repository", "issue", "timelineItems", "nodes"])
+        |> List.wrap()
+        |> Enum.any?(fn
+          %{"source" => %{"__typename" => "PullRequest"} = pull_request} ->
+            open_pull_request_with_feedback?(pull_request, issue_updated_at)
+
+          _ ->
+            false
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Failed to fetch PR feedback for issue_number=#{issue_number}: #{inspect(reason)}")
+        false
+    end
+  end
+
+  defp issue_has_pr_feedback?(_repo_owner, _repo_name, _issue_number, _issue_updated_at), do: false
+
+  defp open_pull_request_with_feedback?(%{"state" => state} = pull_request, issue_updated_at)
+       when is_binary(state) do
+    pull_request_open? = String.upcase(state) == "OPEN"
+
+    review_decision_changes_requested? =
+      case pull_request["reviewDecision"] do
+        decision when is_binary(decision) -> String.upcase(decision) == "CHANGES_REQUESTED"
+        _ -> false
+      end
+
+    has_unresolved_review_threads? =
+      pull_request
+      |> get_in(["reviewThreads", "nodes"])
+      |> List.wrap()
+      |> Enum.any?(fn
+        %{"isResolved" => false} -> true
+        _ -> false
+      end)
+
+    has_new_comments_since_last_issue_update? =
+      pull_request
+      |> get_in(["comments", "nodes"])
+      |> List.wrap()
+      |> Enum.any?(fn
+        %{"body" => body, "updatedAt" => updated_at}
+        when is_binary(body) and is_binary(updated_at) ->
+          String.trim(body) != "" and updated_after_issue?(updated_at, issue_updated_at)
+
+        _ ->
+          false
+      end)
+
+    pull_request_open? and
+      (review_decision_changes_requested? or has_unresolved_review_threads? or has_new_comments_since_last_issue_update?)
+  end
+
+  defp open_pull_request_with_feedback?(_pull_request, _issue_updated_at), do: false
+
+  defp updated_after_issue?(comment_updated_at, %DateTime{} = issue_updated_at)
+       when is_binary(comment_updated_at) do
+    case DateTime.from_iso8601(comment_updated_at) do
+      {:ok, %DateTime{} = comment_datetime, _offset} ->
+        DateTime.compare(comment_datetime, issue_updated_at) in [:gt, :eq]
+
+      _ ->
+        false
+    end
+  end
+
+  defp updated_after_issue?(comment_updated_at, _issue_updated_at) when is_binary(comment_updated_at), do: true
+  defp updated_after_issue?(_comment_updated_at, _issue_updated_at), do: false
+
+  defp preferred_rework_state_name do
+    active_states = Config.linear_active_states()
+
+    Enum.find(active_states, fn state -> normalize_state(state) == "rework" end) ||
+      Enum.find(active_states, fn state -> normalize_state(state) == "in progress" end) ||
+      List.first(active_states) || "In Progress"
+  end
 
   defp status_option_id_for_state(status_options, state_name)
        when is_map(status_options) and is_binary(state_name) do

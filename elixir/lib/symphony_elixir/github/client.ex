@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Github.Client do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.{Config, Github.ReviewFeedback, Linear.Issue}
 
   @page_size 50
 
@@ -153,6 +153,63 @@ defmodule SymphonyElixir.Github.Client do
             }
           }
         }
+        timelineItems(first: 50, itemTypes: [CROSS_REFERENCED_EVENT]) {
+          nodes {
+            ... on CrossReferencedEvent {
+              source {
+                __typename
+                ... on PullRequest {
+                  number
+                  title
+                  url
+                  state
+                  reviewDecision
+                  reviewThreads(first: 100) {
+                    nodes {
+                      isResolved
+                      isOutdated
+                      path
+                      line
+                      comments(first: 20) {
+                        nodes {
+                          body
+                          url
+                          createdAt
+                          updatedAt
+                          author {
+                            login
+                          }
+                        }
+                      }
+                    }
+                  }
+                  reviews(last: 20) {
+                    nodes {
+                      state
+                      body
+                      url
+                      submittedAt
+                      author {
+                        login
+                      }
+                    }
+                  }
+                  comments(last: 20) {
+                    nodes {
+                      body
+                      url
+                      createdAt
+                      updatedAt
+                      author {
+                        login
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -169,16 +226,45 @@ defmodule SymphonyElixir.Github.Client do
                 __typename
                 ... on PullRequest {
                   number
+                  title
+                  url
                   state
                   reviewDecision
                   reviewThreads(first: 100) {
                     nodes {
                       isResolved
+                      isOutdated
+                      path
+                      line
+                      comments(first: 20) {
+                        nodes {
+                          body
+                          url
+                          createdAt
+                          updatedAt
+                          author {
+                            login
+                          }
+                        }
+                      }
                     }
                   }
-                  comments(last: 50) {
+                  reviews(last: 20) {
+                    nodes {
+                      state
+                      body
+                      url
+                      submittedAt
+                      author {
+                        login
+                      }
+                    }
+                  }
+                  comments(last: 20) {
                     nodes {
                       body
+                      url
+                      createdAt
                       updatedAt
                       author {
                         login
@@ -505,6 +591,7 @@ defmodule SymphonyElixir.Github.Client do
           branch_name: nil,
           url: issue["url"],
           assignee_id: nil,
+          pr_review_feedback: nil,
           blocked_by: [],
           labels: normalize_labels(get_in(issue, ["labels", "nodes"])),
           assigned_to_worker: true,
@@ -528,6 +615,8 @@ defmodule SymphonyElixir.Github.Client do
         nil
 
       project_item ->
+        issue_updated_at = parse_datetime(issue["updatedAt"])
+
         %Issue{
           id: to_string(issue["number"]),
           identifier: "GH-#{issue["number"]}",
@@ -538,12 +627,13 @@ defmodule SymphonyElixir.Github.Client do
           branch_name: nil,
           url: issue["url"],
           assignee_id: nil,
+          pr_review_feedback: ReviewFeedback.build_prompt_context(issue, issue_updated_at),
           blocked_by: [],
           labels: normalize_labels(get_in(issue, ["labels", "nodes"])),
           assigned_to_worker: true,
           project_item_updated_at: parse_datetime(project_item["updatedAt"]),
           created_at: parse_datetime(issue["createdAt"]),
-          updated_at: parse_datetime(issue["updatedAt"])
+          updated_at: issue_updated_at
         }
     end
   end
@@ -613,7 +703,12 @@ defmodule SymphonyElixir.Github.Client do
   defp maybe_promote_human_review_issues_with_feedback(issues, _repo_owner, _repo_name), do: issues
 
   defp promote_human_review_issue_with_feedback(
-         %Issue{id: issue_id, identifier: identifier, project_item_updated_at: project_item_updated_at, updated_at: issue_updated_at} = issue,
+         %Issue{
+           id: issue_id,
+           identifier: identifier,
+           project_item_updated_at: project_item_updated_at,
+           updated_at: issue_updated_at
+         } = issue,
          rework_state,
          repo_owner,
          repo_name
@@ -644,16 +739,10 @@ defmodule SymphonyElixir.Github.Client do
            issueNumber: issue_number
          }) do
       {:ok, body} ->
-        body
-        |> get_in(["data", "repository", "issue", "timelineItems", "nodes"])
-        |> List.wrap()
-        |> Enum.any?(fn
-          %{"source" => %{"__typename" => "PullRequest"} = pull_request} ->
-            open_pull_request_with_feedback?(pull_request, issue_updated_at)
-
-          _ ->
-            false
-        end)
+        case decode_issue_graphql_issue(body) do
+          {:ok, issue} -> ReviewFeedback.has_actionable_feedback?(issue, issue_updated_at)
+          {:error, _reason} -> false
+        end
 
       {:error, reason} ->
         Logger.warning("Failed to fetch PR feedback for issue_number=#{issue_number}: #{inspect(reason)}")
@@ -662,58 +751,6 @@ defmodule SymphonyElixir.Github.Client do
   end
 
   defp issue_has_pr_feedback?(_repo_owner, _repo_name, _issue_number, _issue_updated_at), do: false
-
-  defp open_pull_request_with_feedback?(%{"state" => state} = pull_request, issue_updated_at)
-       when is_binary(state) do
-    pull_request_open? = String.upcase(state) == "OPEN"
-
-    review_decision_changes_requested? =
-      case pull_request["reviewDecision"] do
-        decision when is_binary(decision) -> String.upcase(decision) == "CHANGES_REQUESTED"
-        _ -> false
-      end
-
-    has_unresolved_review_threads? =
-      pull_request
-      |> get_in(["reviewThreads", "nodes"])
-      |> List.wrap()
-      |> Enum.any?(fn
-        %{"isResolved" => false} -> true
-        _ -> false
-      end)
-
-    has_new_comments_since_last_issue_update? =
-      pull_request
-      |> get_in(["comments", "nodes"])
-      |> List.wrap()
-      |> Enum.any?(fn
-        %{"body" => body, "updatedAt" => updated_at}
-        when is_binary(body) and is_binary(updated_at) ->
-          String.trim(body) != "" and updated_after_issue?(updated_at, issue_updated_at)
-
-        _ ->
-          false
-      end)
-
-    pull_request_open? and
-      (review_decision_changes_requested? or has_unresolved_review_threads? or has_new_comments_since_last_issue_update?)
-  end
-
-  defp open_pull_request_with_feedback?(_pull_request, _issue_updated_at), do: false
-
-  defp updated_after_issue?(comment_updated_at, %DateTime{} = issue_updated_at)
-       when is_binary(comment_updated_at) do
-    case DateTime.from_iso8601(comment_updated_at) do
-      {:ok, %DateTime{} = comment_datetime, _offset} ->
-        DateTime.compare(comment_datetime, issue_updated_at) in [:gt, :eq]
-
-      _ ->
-        false
-    end
-  end
-
-  defp updated_after_issue?(comment_updated_at, _issue_updated_at) when is_binary(comment_updated_at), do: true
-  defp updated_after_issue?(_comment_updated_at, _issue_updated_at), do: false
 
   defp preferred_rework_state_name do
     active_states = Config.linear_active_states()

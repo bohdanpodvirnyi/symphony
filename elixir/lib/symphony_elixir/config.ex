@@ -20,6 +20,17 @@ defmodule SymphonyElixir.Config do
   {% else %}
   No description provided.
   {% endif %}
+
+  {% if issue.pr_review_feedback %}
+  Active PR review feedback:
+  {{ issue.pr_review_feedback }}
+
+  Review handling requirements:
+  - Treat this as a batch pass across all active feedback, not only the latest comment.
+  - Split multi-part review comments into atomic checklist items before editing.
+  - Before finishing, ensure each active item is fixed, explicitly rebutted with rationale, or marked blocked.
+  - Run a self-review on the final diff to catch follow-up review issues before handoff.
+  {% endif %}
   """
 
   @type workflow_payload :: Workflow.loaded_workflow()

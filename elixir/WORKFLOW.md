@@ -61,11 +61,17 @@ Description:
 No description provided.
 {% endif %}
 
+{% if issue.pr_review_feedback %}
+Active PR review feedback:
+{{ issue.pr_review_feedback }}
+{% endif %}
+
 Instructions:
 
 1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
 2. Only stop early for a true blocker (missing required auth/permissions/secrets). If blocked, record it in the workpad and move the issue according to workflow.
 3. Final message must report completed actions and blockers only. Do not include "next steps for user".
+4. When PR review feedback exists, treat it as a batch queue: gather every active thread/review note, split multi-part comments into atomic tasks, and finish the full batch before handing back to reviewers.
 
 Work only in the provided repository copy. Do not touch any other path.
 
@@ -105,7 +111,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 - `Backlog` -> out of scope for this workflow; do not modify.
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
-  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
+  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, batch all active feedback, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
@@ -119,7 +125,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 3. Route to the matching flow:
    - `Backlog` -> do not modify issue content/state; stop and wait for human to move it to `Todo`.
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
-     - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
+     - If PR is already attached, start by gathering the full active PR feedback set and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Human Review` -> wait and poll for decision/review updates.
    - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
@@ -174,12 +180,19 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
    - Top-level PR comments (`gh pr view --comments`).
    - Inline review comments (`gh api repos/<owner>/<repo>/pulls/<pr>/comments`).
    - Review summaries/states (`gh pr view --json reviews`).
-3. Treat every actionable reviewer comment (human or bot), including inline review comments, as blocking until one of these is true:
+   - Active review threads; treat unresolved + non-outdated threads as the current source of truth.
+3. Build one batch queue from the active feedback set before editing:
+   - include every active thread/review note, not only the latest comment,
+   - split multi-part comments into atomic tasks,
+   - dedupe overlapping asks by file/line/theme,
+   - mark each item as `fix`, `push back`, or `needs clarification`.
+4. Treat every actionable reviewer comment (human or bot), including inline review comments, as blocking until one of these is true:
    - code/test/docs updated to address it, or
    - explicit, justified pushback reply is posted on that thread.
-4. Update the workpad plan/checklist to include each feedback item and its resolution status.
-5. Re-run validation after feedback-driven changes and push updates.
-6. Repeat this sweep until there are no outstanding actionable comments.
+5. Update the workpad plan/checklist to include each feedback item and its resolution status.
+6. Implement the accepted fixes in one pass, then run validation and a fresh self-review on the resulting diff before pushing.
+7. Re-run validation after feedback-driven changes and push updates.
+8. Repeat this sweep until there are no outstanding actionable comments.
 
 ## Blocked-access escape hatch (required behavior)
 
@@ -249,15 +262,17 @@ Use this only when completion is blocked by missing required tools or missing au
 
 ## Step 4: Rework handling
 
-1. Treat `Rework` as a full approach reset, not incremental patching.
-2. Re-read the full issue body and all human comments; explicitly identify what will be done differently this attempt.
-3. Close the existing PR tied to the issue.
-4. Remove the existing `## Codex Workpad` comment from the issue.
-5. Create a fresh branch from `origin/main`.
-6. Start over from the normal kickoff flow:
-   - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
-   - Create a new bootstrap `## Codex Workpad` comment.
-   - Build a fresh plan/checklist and execute end-to-end.
+1. Treat `Rework` as a full feedback sweep, not a reply-to-last-comment loop.
+2. Re-read the full issue body, all relevant human comments, and all active PR feedback.
+3. Rebuild the workpad plan around the current active feedback set:
+   - include every unresolved + non-outdated thread,
+   - split multi-part comments into atomic checklist items,
+   - record the chosen resolution path for each item (`fix`, `push back`, `needs clarification`).
+4. Keep the existing PR and branch when they are still open and healthy; do not restart from scratch unless the branch/PR is closed, merged, corrupted, or otherwise unsafe to continue.
+5. Implement the accepted feedback items in one batch, not one comment at a time.
+6. After the batch lands, run validation plus a fresh self-review of the final diff to catch the next likely review round before handing back.
+7. Update the existing workpad with the batch resolution status, validation evidence, and any explicit pushback replies posted on the PR threads.
+8. Return to the normal execution/handoff flow once the active feedback queue is empty.
 
 ## Completion bar before Human Review
 

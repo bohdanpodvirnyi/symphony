@@ -912,6 +912,28 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "No description provided."
   end
 
+  test "prompt builder default template includes active PR review feedback guidance" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "")
+
+    issue = %Issue{
+      identifier: "GH-58",
+      title: "Address review feedback in batch",
+      description: "Keep the existing PR healthy.",
+      state: "Rework",
+      url: "https://example.org/issues/GH-58",
+      labels: ["github"],
+      pr_review_feedback: "PR #58\nActive review threads:\n1. src/router.ts:42"
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "Active PR review feedback:"
+    assert prompt =~ "PR #58"
+    assert prompt =~ "Treat this as a batch pass across all active feedback"
+    assert prompt =~ "Split multi-part review comments into atomic checklist items"
+    assert prompt =~ "Run a self-review on the final diff"
+  end
+
   test "prompt builder reports workflow load failures separately from template parse errors" do
     original_workflow_path = Workflow.workflow_file_path()
     workflow_store_pid = Process.whereis(SymphonyElixir.WorkflowStore)

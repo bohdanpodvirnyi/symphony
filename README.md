@@ -1,5 +1,10 @@
 # Symphony
 
+> [!NOTE]
+> This repository is a maintained fork of [`openai/symphony`](https://github.com/openai/symphony).
+> Upstream source of truth: `openai/symphony`.
+> Fork-specific notes, current differences, and sync policy: [FORK.md](./FORK.md).
+
 Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
